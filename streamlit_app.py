@@ -4,7 +4,28 @@ from datetime import timedelta
 
 st.set_page_config(page_title="NFL O-Line Scoring", page_icon="🏈", layout="wide")
 
-conn = st.connection("snowflake")
+# ---------------------------------------------------------------------------
+# Connection wrapper: works both locally (st.connection) and in SiS
+# (get_active_session).  Provides a .query(sql, params=) interface so all
+# downstream code stays the same.
+# ---------------------------------------------------------------------------
+try:
+    from snowflake.snowpark.context import get_active_session
+    _session = get_active_session()
+
+    class _SiSConnection:
+        """Thin wrapper so conn.query() works in Streamlit-in-Snowflake."""
+        def query(self, sql, params=None):
+            if params:
+                # Replace in reverse order so :10 is replaced before :1
+                for i in range(len(params), 0, -1):
+                    v = params[i - 1]
+                    sql = sql.replace(f":{i}", "'" + str(v).replace("'", "''") + "'")
+            return _session.sql(sql).to_pandas()
+
+    conn = _SiSConnection()
+except Exception:
+    conn = st.connection("snowflake")
 
 @st.cache_data(ttl=timedelta(minutes=30))
 def get_season_rankings(season):
@@ -56,7 +77,7 @@ def get_matchup_data(team1, team2, season):
 @st.cache_data(ttl=timedelta(minutes=30))
 def get_player_depth_chart(team, season):
     return conn.query(
-        """SELECT FULL_NAME, POSITION, DEPTH_TEAM, WEEK, GAME_ID
+        """SELECT FULL_NAME, POSITION, DEPTH_TEAM, WEEK
            FROM NFL_ANALYTICS.OL_SCORING.RAW_DEPTH_CHARTS
            WHERE CLUB_CODE = :1 AND SEASON = :2
              AND POSITION IN ('C','OG','OT','G','T','LT','RT','LG','RG')
@@ -264,13 +285,13 @@ if page == "Team Rankings":
     df = get_season_rankings(selected_season)
 
     top3 = df.head(3)
-    with st.container(horizontal=True):
-        for _, row in top3.iterrows():
+    cols = st.columns(3)
+    for idx, (_, row) in enumerate(top3.iterrows()):
+        with cols[idx]:
             st.metric(
                 f"#{int(row['SEASON_RANK'])} {row['TEAM']}",
                 f"{row['AVG_OL_SCORE']}",
                 f"Pass: {row['AVG_PASS_BLOCK']} | Run: {row['AVG_RUN_BLOCK']}",
-                border=True,
             )
 
     st.subheader("Full Rankings")
@@ -286,18 +307,7 @@ if page == "Team Rankings":
 
     st.dataframe(
         display_df,
-        hide_index=True,
         use_container_width=True,
-        column_config={
-            "OL Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-            "Pass Block": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-            "Run Block": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-            "Sack Rate": st.column_config.NumberColumn(format="%.1f%%"),
-            "Pressure Rate": st.column_config.NumberColumn(format="%.1f%%"),
-            "Stuff Rate": st.column_config.NumberColumn(format="%.1f%%"),
-            "YPC": st.column_config.NumberColumn(format="%.2f"),
-            "Penalties/Game": st.column_config.NumberColumn(format="%.1f"),
-        },
     )
 
 elif page == "Team Deep Dive":
@@ -315,25 +325,26 @@ elif page == "Team Deep Dive":
             avg_run = round(games["RUN_BLOCK_SCORE"].mean(), 1)
             avg_sack = round(games["SACK_RATE"].mean() * 100, 1)
 
-            with st.container(horizontal=True):
-                st.metric("Avg OL Score", f"{avg_ol}", border=True,
-                          chart_data=games["COMPOSITE_OL_SCORE"].tolist(), chart_type="line")
-                st.metric("Pass Block", f"{avg_pass}", border=True,
-                          chart_data=games["PASS_BLOCK_SCORE"].tolist(), chart_type="line")
-                st.metric("Run Block", f"{avg_run}", border=True,
-                          chart_data=games["RUN_BLOCK_SCORE"].tolist(), chart_type="line")
-                st.metric("Sack Rate", f"{avg_sack}%", border=True)
+            cols = st.columns(4)
+            with cols[0]:
+                st.metric("Avg OL Score", f"{avg_ol}")
+            with cols[1]:
+                st.metric("Pass Block", f"{avg_pass}")
+            with cols[2]:
+                st.metric("Run Block", f"{avg_run}")
+            with cols[3]:
+                st.metric("Sack Rate", f"{avg_sack}%")
 
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("OL Score by Week")
                     chart_data = games[["WEEK", "COMPOSITE_OL_SCORE", "PASS_BLOCK_SCORE", "RUN_BLOCK_SCORE"]].set_index("WEEK")
                     chart_data.columns = ["Composite", "Pass Block", "Run Block"]
                     st.line_chart(chart_data)
 
             with col2:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("Key Metrics by Week")
                     metrics_data = games[["WEEK", "SACK_RATE", "PRESSURE_RATE", "STUFF_RATE"]].copy()
                     metrics_data["SACK_RATE"] = metrics_data["SACK_RATE"] * 100
@@ -343,7 +354,7 @@ elif page == "Team Deep Dive":
                     metrics_data.columns = ["Sack Rate %", "Pressure Rate %", "Stuff Rate %"]
                     st.line_chart(metrics_data)
 
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Game Log")
                 game_log = games[[
                     "WEEK", "OPPONENT", "COMPOSITE_OL_SCORE", "PASS_BLOCK_SCORE",
@@ -354,17 +365,16 @@ elif page == "Team Deep Dive":
                     "Week", "Opponent", "OL Score", "Pass Block", "Run Block",
                     "Sacks", "Dropbacks", "Rush Att", "Avg Rush Yds", "Penalties"
                 ]
-                st.dataframe(game_log, hide_index=True, use_container_width=True)
+                st.dataframe(game_log, use_container_width=True)
 
             st.subheader("O-Line Starters")
             depth = get_player_depth_chart(selected_team, selected_season)
             if not depth.empty:
                 latest_week = depth["WEEK"].max()
-                starters = depth[(depth["WEEK"] == latest_week) & (depth["DEPTH_TEAM"] == 1)]
+                starters = depth[(depth["WEEK"] == latest_week) & (depth["DEPTH_TEAM"].astype(str) == "1")]
                 if not starters.empty:
                     st.dataframe(
                         starters[["FULL_NAME", "POSITION"]].drop_duplicates(),
-                        hide_index=True,
                         use_container_width=True,
                     )
                 else:
@@ -384,47 +394,43 @@ elif page == "Situational Analysis":
         with tab1:
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("Redzone EPA by Team")
                     rz = sit[["TEAM", "AVG_REDZONE_EPA"]].set_index("TEAM").sort_values("AVG_REDZONE_EPA", ascending=False)
                     st.bar_chart(rz)
             with col2:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("Own Territory EPA (Backs Against the Wall)")
                     ot = sit[["TEAM", "AVG_OWN_TERRITORY_EPA"]].set_index("TEAM").sort_values("AVG_OWN_TERRITORY_EPA", ascending=False)
                     st.bar_chart(ot)
 
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Redzone Breakdown")
                 rz_detail = sit[["TEAM", "AVG_REDZONE_EPA", "AVG_REDZONE_STUFF_RATE", "AVG_REDZONE_SACK_RATE"]].copy()
                 rz_detail.columns = ["Team", "Redzone EPA", "Redzone Stuff Rate", "Redzone Sack Rate"]
                 rz_detail = rz_detail.sort_values("Redzone EPA", ascending=False)
-                st.dataframe(rz_detail, hide_index=True, use_container_width=True,
-                    column_config={
-                        "Redzone Stuff Rate": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Redzone Sack Rate": st.column_config.NumberColumn(format="%.1f%%"),
-                    })
+                st.dataframe(rz_detail, use_container_width=True)
 
         with tab2:
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("3rd & Short Success Rate")
                     ts = sit[["TEAM", "AVG_3RD_SHORT_SUCCESS"]].set_index("TEAM").sort_values("AVG_3RD_SHORT_SUCCESS", ascending=False)
                     st.bar_chart(ts)
             with col2:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("3rd & Long Sack Rate (Lower = Better)")
                     tl = sit[["TEAM", "AVG_3RD_LONG_SACK_RATE"]].set_index("TEAM").sort_values("AVG_3RD_LONG_SACK_RATE", ascending=True)
                     st.bar_chart(tl)
 
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Early vs Late Down EPA Gap")
                 st.caption("Positive = better on early downs, Negative = better under pressure on late downs")
                 clutch = sit[["TEAM", "AVG_EARLY_DOWN_EPA", "AVG_LATE_DOWN_EPA", "AVG_CLUTCH_DIFF"]].copy()
                 clutch.columns = ["Team", "Early Down EPA", "Late Down EPA", "Clutch Gap"]
                 clutch = clutch.sort_values("Clutch Gap", ascending=True)
-                st.dataframe(clutch, hide_index=True, use_container_width=True)
+                st.dataframe(clutch, use_container_width=True)
 
         with tab3:
             teams = get_all_teams(selected_season)
@@ -432,33 +438,36 @@ elif page == "Situational Analysis":
             if sel_team:
                 weekly = get_situational_weekly(sel_team, selected_season)
                 if not weekly.empty:
-                    with st.container(horizontal=True):
-                        rz_avg = round(weekly["REDZONE_EPA"].mean(), 2)
-                        early_avg = round(weekly["EARLY_DOWN_EPA"].mean(), 2)
-                        short_avg = round(weekly["THIRD_SHORT_SUCCESS"].dropna().mean() * 100, 1)
-                        st.metric("Avg Redzone EPA", f"{rz_avg}", border=True)
-                        st.metric("Avg Early Down EPA", f"{early_avg}", border=True)
-                        st.metric("3rd & Short Success", f"{short_avg}%", border=True)
+                    rz_avg = round(weekly["REDZONE_EPA"].mean(), 2)
+                    early_avg = round(weekly["EARLY_DOWN_EPA"].mean(), 2)
+                    short_avg = round(weekly["THIRD_SHORT_SUCCESS"].dropna().mean() * 100, 1)
+                    cols = st.columns(3)
+                    with cols[0]:
+                        st.metric("Avg Redzone EPA", f"{rz_avg}")
+                    with cols[1]:
+                        st.metric("Avg Early Down EPA", f"{early_avg}")
+                    with cols[2]:
+                        st.metric("3rd & Short Success", f"{short_avg}%")
 
                     col1, col2 = st.columns(2)
                     with col1:
-                        with st.container(border=True):
+                        with st.container():
                             st.subheader("Redzone EPA by Week")
                             st.line_chart(weekly[["WEEK", "REDZONE_EPA"]].set_index("WEEK"))
                     with col2:
-                        with st.container(border=True):
+                        with st.container():
                             st.subheader("Early vs Late Down EPA")
                             epa_chart = weekly[["WEEK", "EARLY_DOWN_EPA", "LATE_DOWN_EPA"]].set_index("WEEK")
                             epa_chart.columns = ["Early Down", "Late Down"]
                             st.line_chart(epa_chart)
 
-                    with st.container(border=True):
+                    with st.container():
                         st.subheader("Weekly Situational Detail")
                         detail = weekly.copy()
                         detail.columns = ["Week", "Early Down EPA", "Late Down EPA", "Clutch Gap",
                                           "3rd Short Success", "3rd Long Sack Rate",
                                           "Redzone EPA", "Redzone Stuff Rate", "Own Territory EPA"]
-                        st.dataframe(detail, hide_index=True, use_container_width=True)
+                        st.dataframe(detail, use_container_width=True)
                 else:
                     st.info("No situational data available for this team/season.")
     else:
@@ -477,21 +486,25 @@ elif page == "OL Clutch Index":
             best = clutch.iloc[0]
             worst = clutch.iloc[-1]
             league_avg = round(clutch["AVG_CLUTCH_INDEX"].mean(), 4)
-            with st.container(horizontal=True):
-                st.metric("Most Clutch OL", f"{best['TEAM']}", f"{best['AVG_CLUTCH_INDEX']:+.4f}", border=True)
-                st.metric("Least Clutch OL", f"{worst['TEAM']}", f"{worst['AVG_CLUTCH_INDEX']:+.4f}", border=True)
-                st.metric("League Avg Clutch", f"{league_avg:+.4f}", border=True)
-                st.metric("Avg Clean Pocket Rate", f"{clutch['AVG_CLEAN_POCKET_RATE'].mean():.1%}", border=True)
+            cols = st.columns(4)
+            with cols[0]:
+                st.metric("Most Clutch OL", f"{best['TEAM']}", f"{best['AVG_CLUTCH_INDEX']:+.4f}")
+            with cols[1]:
+                st.metric("Least Clutch OL", f"{worst['TEAM']}", f"{worst['AVG_CLUTCH_INDEX']:+.4f}")
+            with cols[2]:
+                st.metric("League Avg Clutch", f"{league_avg:+.4f}")
+            with cols[3]:
+                st.metric("Avg Clean Pocket Rate", f"{clutch['AVG_CLEAN_POCKET_RATE'].mean():.1%}")
 
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("OL Clutch Index by Team")
                     st.caption("Positive = rises in big moments, Negative = chokes under pressure")
                     ci = clutch[["TEAM", "AVG_CLUTCH_INDEX"]].set_index("TEAM")
                     st.bar_chart(ci)
             with col2:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("High vs Low Leverage OL Success Rate")
                     hl = clutch[["TEAM", "AVG_HIGH_LEV_SUCCESS", "AVG_LOW_LEV_SUCCESS"]].set_index("TEAM")
                     hl.columns = ["High Leverage", "Low Leverage"]
@@ -499,19 +512,19 @@ elif page == "OL Clutch Index":
 
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("Pass Protection Clutch")
                     st.caption("Negative = lower pressure rate in clutch (good)")
                     pc = clutch[["TEAM", "AVG_PROTECTION_CLUTCH"]].set_index("TEAM").sort_values("AVG_PROTECTION_CLUTCH")
                     st.bar_chart(pc)
             with col2:
-                with st.container(border=True):
+                with st.container():
                     st.subheader("Run Blocking Clutch")
                     st.caption("Negative = lower stuff rate in clutch (good)")
                     rc = clutch[["TEAM", "AVG_RUN_CLUTCH"]].set_index("TEAM").sort_values("AVG_RUN_CLUTCH")
                     st.bar_chart(rc)
 
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Full Clutch Breakdown")
                 display = clutch.copy()
                 display.columns = [
@@ -519,14 +532,7 @@ elif page == "OL Clutch Index":
                     "High Lev Success", "Low Lev Success", "High Lev EPA",
                     "Pass Prot Clutch", "Run Block Clutch", "Responsibility Rate"
                 ]
-                st.dataframe(display, hide_index=True, use_container_width=True,
-                    column_config={
-                        "OL Success Rate": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Clean Pocket Rate": st.column_config.NumberColumn(format="%.1f%%"),
-                        "High Lev Success": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Low Lev Success": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Responsibility Rate": st.column_config.NumberColumn(format="%.1f%%"),
-                    })
+                st.dataframe(display, use_container_width=True)
 
         with tab2:
             teams = get_all_teams(selected_season)
@@ -537,30 +543,33 @@ elif page == "OL Clutch Index":
                     avg_clutch = round(weekly["OL_CLUTCH_INDEX"].mean(), 4)
                     avg_pocket = round(weekly["OL_CLEAN_POCKET_RATE"].mean() * 100, 1)
                     avg_success = round(weekly["OL_SUCCESS_RATE"].mean() * 100, 1)
-                    with st.container(horizontal=True):
-                        st.metric("Avg Clutch Index", f"{avg_clutch:+.4f}", border=True)
-                        st.metric("Avg Clean Pocket", f"{avg_pocket}%", border=True)
-                        st.metric("OL Success Rate", f"{avg_success}%", border=True)
+                    cols = st.columns(3)
+                    with cols[0]:
+                        st.metric("Avg Clutch Index", f"{avg_clutch:+.4f}")
+                    with cols[1]:
+                        st.metric("Avg Clean Pocket", f"{avg_pocket}%")
+                    with cols[2]:
+                        st.metric("OL Success Rate", f"{avg_success}%")
 
                     col1, col2 = st.columns(2)
                     with col1:
-                        with st.container(border=True):
+                        with st.container():
                             st.subheader("Clutch Index by Week")
                             st.line_chart(weekly[["WEEK", "OL_CLUTCH_INDEX"]].set_index("WEEK"))
                     with col2:
-                        with st.container(border=True):
+                        with st.container():
                             st.subheader("High vs Low Leverage Success")
                             lev = weekly[["WEEK", "OL_HIGH_LEVERAGE_SUCCESS", "OL_LOW_LEVERAGE_SUCCESS"]].set_index("WEEK")
                             lev.columns = ["High Leverage", "Low Leverage"]
                             st.line_chart(lev)
 
-                    with st.container(border=True):
+                    with st.container():
                         st.subheader("Weekly Clutch Detail")
                         detail = weekly.copy()
                         detail.columns = ["Week", "Clutch Index", "OL Success", "Clean Pocket",
                                           "High Lev Success", "Low Lev Success",
                                           "High Lev EPA", "Pass Prot Clutch", "Run Block Clutch"]
-                        st.dataframe(detail, hide_index=True, use_container_width=True)
+                        st.dataframe(detail, use_container_width=True)
                 else:
                     st.info("No clutch data available for this team/season.")
 
@@ -580,13 +589,13 @@ elif page == "OL Clutch Index":
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    with st.container(border=True):
+                    with st.container():
                         st.subheader("League Clutch Index by Season")
                         ci_trend = trend[["SEASON", "AVG_CLUTCH_INDEX"]].set_index("SEASON")
                         ci_trend.columns = ["Avg Clutch Index"]
                         st.line_chart(ci_trend)
                 with col2:
-                    with st.container(border=True):
+                    with st.container():
                         st.subheader("Clean Pocket Rate & OL Success Rate")
                         rates = trend[["SEASON", "AVG_CLEAN_POCKET_RATE", "AVG_OL_SUCCESS_RATE"]].set_index("SEASON")
                         rates.columns = ["Clean Pocket Rate", "OL Success Rate"]
@@ -594,21 +603,21 @@ elif page == "OL Clutch Index":
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    with st.container(border=True):
+                    with st.container():
                         st.subheader("Clutch Index Volatility (Std Dev)")
                         st.caption("Higher = more variation between teams that season")
                         vol = trend[["SEASON", "STD_CLUTCH_INDEX"]].set_index("SEASON")
                         vol.columns = ["Std Dev"]
                         st.bar_chart(vol)
                 with col2:
-                    with st.container(border=True):
+                    with st.container():
                         st.subheader("Pass Protection vs Run Blocking Clutch")
                         st.caption("Positive = worse in high leverage (more pressure/stuffs)")
                         split = trend[["SEASON", "AVG_PROTECTION_CLUTCH", "AVG_RUN_CLUTCH"]].set_index("SEASON")
                         split.columns = ["Pass Prot Clutch", "Run Block Clutch"]
                         st.line_chart(split)
 
-                with st.container(border=True):
+                with st.container():
                     st.subheader("Season-by-Season Data")
                     trend_display = trend.copy()
                     trend_display.columns = [
@@ -616,7 +625,7 @@ elif page == "OL Clutch Index":
                         "OL Success Rate", "Pass Prot Clutch", "Run Block Clutch",
                         "Teams", "Games"
                     ]
-                    st.dataframe(trend_display, hide_index=True, use_container_width=True)
+                    st.dataframe(trend_display, use_container_width=True)
 
                 st.divider()
                 st.subheader("Team Journey Across Seasons")
@@ -626,35 +635,38 @@ elif page == "OL Clutch Index":
                 if journey_team:
                     history = get_clutch_team_history(journey_team)
                     if not history.empty:
-                        with st.container(horizontal=True):
-                            latest = history.iloc[-1]
-                            earliest = history.iloc[0]
-                            delta = round(latest["AVG_CLUTCH_INDEX"] - earliest["AVG_CLUTCH_INDEX"], 4)
+                        latest = history.iloc[-1]
+                        earliest = history.iloc[0]
+                        delta = round(latest["AVG_CLUTCH_INDEX"] - earliest["AVG_CLUTCH_INDEX"], 4)
+                        cols = st.columns(3)
+                        with cols[0]:
                             st.metric(f"{journey_team} Latest Clutch", f"{latest['AVG_CLUTCH_INDEX']:+.4f}",
-                                      f"{delta:+.4f} since {int(earliest['SEASON'])}", border=True)
-                            st.metric("Latest Clean Pocket", f"{latest['AVG_CLEAN_POCKET_RATE']:.1%}", border=True)
-                            st.metric("Latest OL Success", f"{latest['AVG_OL_SUCCESS_RATE']:.1%}", border=True)
+                                      f"{delta:+.4f} since {int(earliest['SEASON'])}")
+                        with cols[1]:
+                            st.metric("Latest Clean Pocket", f"{latest['AVG_CLEAN_POCKET_RATE']:.1%}")
+                        with cols[2]:
+                            st.metric("Latest OL Success", f"{latest['AVG_OL_SUCCESS_RATE']:.1%}")
 
                         col1, col2 = st.columns(2)
                         with col1:
-                            with st.container(border=True):
+                            with st.container():
                                 st.subheader(f"{journey_team} Clutch Index Over Time")
                                 h_ci = history[["SEASON", "AVG_CLUTCH_INDEX"]].set_index("SEASON")
                                 h_ci.columns = ["Clutch Index"]
                                 st.line_chart(h_ci)
                         with col2:
-                            with st.container(border=True):
+                            with st.container():
                                 st.subheader(f"{journey_team} Pocket & Success Rate")
                                 h_rates = history[["SEASON", "AVG_CLEAN_POCKET_RATE", "AVG_OL_SUCCESS_RATE"]].set_index("SEASON")
                                 h_rates.columns = ["Clean Pocket", "OL Success"]
                                 st.line_chart(h_rates)
 
-                        with st.container(border=True):
+                        with st.container():
                             st.subheader(f"{journey_team} Full History")
                             h_display = history.copy()
                             h_display.columns = ["Season", "Clutch Index", "Clean Pocket", "OL Success",
                                                   "High Lev Success", "Pass Prot Clutch", "Run Block Clutch"]
-                            st.dataframe(h_display, hide_index=True, use_container_width=True)
+                            st.dataframe(h_display, use_container_width=True)
                     else:
                         st.info("No historical data available for this team.")
             else:
@@ -690,15 +702,23 @@ elif page == "Matchup Predictor":
             t1_ml = get_ml_prediction_for_team(team1)
             t2_ml = get_ml_prediction_for_team(team2)
 
-            with st.container(horizontal=True):
-                st.metric(f"{team1} Rolling Avg", f"{t1_pred}", border=True)
-                if not t1_ml.empty:
-                    st.metric(f"{team1} ML Predicted", f"{round(t1_ml.iloc[0]['PREDICTED_OL_SCORE'], 1)}", border=True)
-                st.metric(f"{team2} Rolling Avg", f"{t2_pred}", border=True)
-                if not t2_ml.empty:
-                    st.metric(f"{team2} ML Predicted", f"{round(t2_ml.iloc[0]['PREDICTED_OL_SCORE'], 1)}", border=True)
+            cols = st.columns(4)
+            col_idx = 0
+            with cols[col_idx]:
+                st.metric(f"{team1} Rolling Avg", f"{t1_pred}")
+            col_idx += 1
+            if not t1_ml.empty:
+                with cols[col_idx]:
+                    st.metric(f"{team1} ML Predicted", f"{round(t1_ml.iloc[0]['PREDICTED_OL_SCORE'], 1)}")
+                col_idx += 1
+            with cols[col_idx]:
+                st.metric(f"{team2} Rolling Avg", f"{t2_pred}")
+            col_idx += 1
+            if not t2_ml.empty and col_idx < 4:
+                with cols[col_idx]:
+                    st.metric(f"{team2} ML Predicted", f"{round(t2_ml.iloc[0]['PREDICTED_OL_SCORE'], 1)}")
 
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Season OL Score Trend")
                 pivot = matchup.pivot_table(
                     index="WEEK", columns="TEAM", values="COMPOSITE_OL_SCORE"
@@ -707,14 +727,14 @@ elif page == "Matchup Predictor":
 
             col1, col2 = st.columns(2)
             with col1:
-                with st.container(border=True):
+                with st.container():
                     st.subheader(f"{team1} — Pass vs Run Block")
                     t1_chart = t1_data[["WEEK", "PASS_BLOCK_SCORE", "RUN_BLOCK_SCORE"]].set_index("WEEK")
                     t1_chart.columns = ["Pass Block", "Run Block"]
                     st.line_chart(t1_chart)
 
             with col2:
-                with st.container(border=True):
+                with st.container():
                     st.subheader(f"{team2} — Pass vs Run Block")
                     t2_chart = t2_data[["WEEK", "PASS_BLOCK_SCORE", "RUN_BLOCK_SCORE"]].set_index("WEEK")
                     t2_chart.columns = ["Pass Block", "Run Block"]
@@ -730,44 +750,38 @@ elif page == "ML Predictions":
 
     if not preds.empty:
         top3 = preds.head(3)
-        with st.container(horizontal=True):
-            for _, row in top3.iterrows():
+        cols = st.columns(3)
+        for idx, (_, row) in enumerate(top3.iterrows()):
+            with cols[idx]:
                 st.metric(
                     f"#{preds.index.get_loc(_) + 1} {row['TEAM']}",
                     f"{row['PREDICTED_OL_SCORE']}",
                     f"Pass: {row['PREDICTED_PASS_BLOCK']} | Run: {row['PREDICTED_RUN_BLOCK']}",
-                    border=True,
                 )
 
-        with st.container(border=True):
+        with st.container():
             st.subheader("All Teams — Predicted Next-Game OL Score")
             display = preds.copy()
             display.insert(0, "RANK", range(1, len(display) + 1))
             display.columns = ["Rank", "Team", "Last Season", "Last Week", "Pred OL Score", "Pred Pass Block", "Pred Run Block"]
             st.dataframe(
                 display,
-                hide_index=True,
                 use_container_width=True,
-                column_config={
-                    "Pred OL Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-                    "Pred Pass Block": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-                    "Pred Run Block": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-                },
             )
 
         col1, col2 = st.columns(2)
         with col1:
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Predicted OL Score Distribution")
                 st.bar_chart(preds.set_index("TEAM")["PREDICTED_OL_SCORE"])
         with col2:
-            with st.container(border=True):
+            with st.container():
                 st.subheader("Pass vs Run Block Predictions")
                 scatter_data = preds[["TEAM", "PREDICTED_PASS_BLOCK", "PREDICTED_RUN_BLOCK"]].set_index("TEAM")
                 scatter_data.columns = ["Pass Block", "Run Block"]
                 st.bar_chart(scatter_data)
 
-        with st.container(border=True):
+        with st.container():
             st.subheader("Model Performance — v1 / v2 / v3")
             st.markdown("""
 | Model | v1 MAE | v2 MAE | v3 MAE | v1 R2 | v2 R2 | v3 R2 |
@@ -798,12 +812,15 @@ elif page == "Game Summary":
                     summary = get_ai_summary(selected_team, selected_season, selected_week)
                     if not summary.empty:
                         row = summary.iloc[0]
-                        with st.container(horizontal=True):
-                            st.metric("OL Score", f"{row['COMPOSITE_OL_SCORE']}", border=True)
-                            st.metric("Pass Block", f"{row['PASS_BLOCK_SCORE']}", border=True)
-                            st.metric("Run Block", f"{row['RUN_BLOCK_SCORE']}", border=True)
+                        cols = st.columns(3)
+                        with cols[0]:
+                            st.metric("OL Score", f"{row['COMPOSITE_OL_SCORE']}")
+                        with cols[1]:
+                            st.metric("Pass Block", f"{row['PASS_BLOCK_SCORE']}")
+                        with cols[2]:
+                            st.metric("Run Block", f"{row['RUN_BLOCK_SCORE']}")
 
-                        with st.container(border=True):
+                        with st.container():
                             raw = row["AI_SUMMARY"]
                             cleaned = raw.strip('"').strip()
                             st.markdown(f"**AI Analysis:**\n\n{cleaned}")
@@ -837,7 +854,7 @@ elif page == "Ask the OL Analyst":
             if not result.empty:
                 answer = result.iloc[0]["AI_ANSWER"]
                 cleaned = answer.strip('"').strip()
-                with st.container(border=True):
+                with st.container():
                     st.markdown(f"**AI Analysis for {ask_team} ({ask_season}):**\n\n{cleaned}")
             else:
                 st.warning("No data available for this team/season combination.")

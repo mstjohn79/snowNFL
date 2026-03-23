@@ -7,7 +7,6 @@ entities:
       database: NFL_ANALYTICS
       schema: OL_SCORING
     query_warehouse: COMPUTE_WH
-    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
     main_file: streamlit_app.py
     artifacts:
       - streamlit_app.py
