@@ -126,37 +126,37 @@ def main():
     mv_ol = reg.log_model(
         ol_model,
         model_name="NFL_OL_COMPOSITE_PREDICTOR",
-        version_name="v3",
+        version_name="v4",
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=sample_input,
-        comment="XGBoost v3 with OL responsibility, leverage-weighted clutch index, protection/run clutch",
+        comment="XGBoost v4 with corrected percentile scoring (lower-is-better metrics fixed)",
         metrics=ol_metrics,
     )
-    print(f"    Registered: NFL_OL_COMPOSITE_PREDICTOR v3")
+    print(f"    Registered: NFL_OL_COMPOSITE_PREDICTOR v4")
 
     print("  Registering pass block model...")
     mv_pass = reg.log_model(
         pass_model,
         model_name="NFL_PASS_BLOCK_PREDICTOR",
-        version_name="v3",
+        version_name="v4",
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=sample_input,
-        comment="XGBoost v3 pass block with clutch index features",
+        comment="XGBoost v4 pass block with corrected percentile scoring",
         metrics=pass_metrics,
     )
-    print(f"    Registered: NFL_PASS_BLOCK_PREDICTOR v3")
+    print(f"    Registered: NFL_PASS_BLOCK_PREDICTOR v4")
 
     print("  Registering run block model...")
     mv_run = reg.log_model(
         run_model,
         model_name="NFL_RUN_BLOCK_PREDICTOR",
-        version_name="v3",
+        version_name="v4",
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=sample_input,
-        comment="XGBoost v3 run block with clutch index features",
+        comment="XGBoost v4 run block with corrected percentile scoring",
         metrics=run_metrics,
     )
-    print(f"    Registered: NFL_RUN_BLOCK_PREDICTOR v3")
+    print(f"    Registered: NFL_RUN_BLOCK_PREDICTOR v4")
 
     print("\n=== Running Inference on Test Data ===")
     test_sp = session.create_dataframe(X_test)

@@ -41,7 +41,7 @@ nfl_data_py / Next Gen Stats / Pro Football Reference
                                           |
                                           v
                               Snowflake Model Registry
-                              (v1, v2, v3 XGBoost)
+                              (v1-v4 XGBoost)
                                           |
                                           v
                               ML_NEXT_GAME_PREDICTIONS
@@ -154,27 +154,30 @@ OL Clutch Index = (OL success rate in HIGH leverage) - (OL success rate in LOW l
 | **v1** | 26 | Base pass/run/penalty + rolling averages | 1.62 | 1.68 | 1.28 | 0.9815 |
 | **v2** | 40 | +14 situational (down/distance, redzone, field position) | 1.47 | 1.01 | 0.91 | 0.9833 |
 | **v3** | 49 | +9 clutch (OL responsibility, leverage, clutch index) | 1.84 | 1.20 | 0.93 | 0.9801 |
+| **v4** | 49 | Corrected percentile scoring (lower-is-better metrics fixed) | 1.83 | 1.21 | 0.97 | 0.9797 |
 
-### Why v3 Composite MAE Increased
-The clutch features add meaningful variance that helps **distinguish** clutch OLs from non-clutch ones, but this slightly reduces pure score prediction accuracy. The trade-off is worth it: **OL_SUCCESS_RATE became the #1 most important feature** (0.294 importance score), proving the framework captures genuine signal about OL quality.
+### Why v4
 
-### Top v3 Feature Importances
-1. **OL_SUCCESS_RATE** (0.294) — *new clutch feature*
-2. QB_HIT_RATE (0.144)
-3. SACK_RATE (0.127)
-4. RUSH_EPA_PER_PLAY (0.101)
-5. AVG_RUSH_YARDS (0.070)
-6. EARLY_DOWN_EPA (0.052)
+v4 uses the same 49 features as v3 but fixes a critical bug in the percentile scoring: "lower is better" metrics (sack rate, pressure rate, QB hit rate, stuff rate, penalties) were inverted, causing the worst OLs to score highest. After correction, **OL_SUCCESS_RATE remains the #1 most important feature** (0.267 importance score), confirming the clutch framework captures genuine signal.
+
+### Top v4 Feature Importances
+1. **OL_SUCCESS_RATE** (0.267) — *clutch feature*
+2. QB_HIT_RATE (0.159)
+3. SACK_RATE (0.103)
+4. ROLLING_3_OL_SCORE (0.089)
+5. RUSH_EPA_PER_PLAY (0.079)
+6. EARLY_DOWN_EPA (0.057)
 7. PASS_EPA_PER_PLAY (0.042)
-8. **OL_CLEAN_POCKET_RATE** (0.035) — *new clutch feature*
+8. **OL_CLEAN_POCKET_RATE** (0.035) — *clutch feature*
 
 ## Key Findings
 
 - **League-wide clutch trend**: OL clutch index rose from ~0.01 (2018-2019) to ~0.10 (2023-2025). NFL OLs collectively became significantly better in high-leverage situations.
 - **Clean pocket rates jumped**: From 63.5% (2018) to 71.5% (2023), suggesting offensive line play has materially improved.
-- **2024 most clutch OL**: ATL (+0.44 clutch index) — rises dramatically in big moments.
+- **2025 #1 OL**: LA Rams (66.6 composite score) — elite pass protection with a 3.9% sack rate.
+- **2025 most clutch OL**: DEN (+0.34 clutch index) — elevates dramatically in big moments.
 - **KC pass protection clutch**: +0.28 — Patrick Mahomes' OL tightens up when the game is on the line, matching the real-world narrative.
-- **CLE least clutch**: -0.06 — tends to crumble under pressure.
+- **2025 least clutch**: NO (-0.13) — tends to crumble under pressure. CLE ranked dead last overall (33.8).
 
 ## Dashboard Pages
 
@@ -185,7 +188,7 @@ The clutch features add meaningful variance that helps **distinguish** clutch OL
 | **Situational Analysis** | Redzone, down/distance, field position performance |
 | **OL Clutch Index** | Clutch rankings, leverage analysis, multi-season story |
 | **Matchup Predictor** | Head-to-head OL comparison with ML predictions |
-| **ML Predictions** | Next-game predictions from XGBoost v3, model performance |
+| **ML Predictions** | Next-game predictions from XGBoost v4, model performance |
 | **Game Summary** | Per-game AI-generated analysis via Cortex COMPLETE |
 | **Ask the OL Analyst** | Free-text Q&A about any team, powered by Cortex AI |
 | **Methodology** | Full metric glossary, scoring methodology, model evolution |
@@ -197,7 +200,7 @@ The clutch features add meaningful variance that helps **distinguish** clutch OL
 | `ingest_nfl_data.py` | Downloads NFL data via nfl_data_py and loads into Snowflake raw tables |
 | `feature_engineering.sql` | SQL to create all feature tables from raw play-by-play data |
 | `train_models.py` | Trains 3 XGBoost models (composite, pass, run) and registers in Snowflake Model Registry |
-| `run_inference.py` | Loads v3 models from registry and generates next-game predictions |
+| `run_inference.py` | Loads v4 models from registry and generates next-game predictions |
 | `streamlit_app.py` | 9-page Streamlit dashboard (1,049 lines) |
 | `snowflake.yml` | Snowflake deployment manifest for Streamlit in Snowflake |
 | `pyproject.toml` | Python project dependencies |
@@ -242,5 +245,5 @@ snow streamlit deploy --replace
 - **Database**: `NFL_ANALYTICS`
 - **Schema**: `OL_SCORING`
 - **Warehouse**: `COMPUTE_WH` (XS)
-- **Models**: `NFL_OL_COMPOSITE_PREDICTOR`, `NFL_PASS_BLOCK_PREDICTOR`, `NFL_RUN_BLOCK_PREDICTOR` (v1, v2, v3)
+- **Models**: `NFL_OL_COMPOSITE_PREDICTOR`, `NFL_PASS_BLOCK_PREDICTOR`, `NFL_RUN_BLOCK_PREDICTOR` (v1-v4)
 - **Cortex AI**: `SNOWFLAKE.CORTEX.COMPLETE('llama3.1-8b', ...)` for game summaries and interactive Q&A
