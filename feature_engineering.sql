@@ -3,6 +3,36 @@ USE SCHEMA OL_SCORING;
 USE WAREHOUSE COMPUTE_WH;
 
 -- =============================================================================
+-- PBP_CHARTED: play-by-play with DEFENDERS_IN_BOX and NUMBER_OF_PASS_RUSHERS
+-- backfilled from FTN charting.
+--
+-- Those two columns arrive via pbp_participation, which nflverse publishes
+-- retroactively, so they are NULL for any in-progress season. participation is
+-- itself FTN data republished after the fact, and nflreadpy permits FTN for the
+-- current season -- so the same numbers are available live from RAW_FTN_CHARTING.
+--
+-- Measured on 2025 plays: N_DEFENSE_BOX matches participation's
+-- DEFENDERS_IN_BOX on 99.8% of plays (corr 0.9996, mean abs diff 0.003), and
+-- N_PASS_RUSHERS matches NUMBER_OF_PASS_RUSHERS on 100.0%. This is a backfill
+-- of one source from itself, not a definitional change.
+--
+-- participation is preferred where present because FTN only goes back to 2022,
+-- while participation covers 2016-2025. FTN carries no pressure field, so
+-- WAS_PRESSURE still has no live play-level substitute.
+-- =============================================================================
+CREATE OR REPLACE VIEW PBP_CHARTED AS
+SELECT
+    p.* EXCLUDE (DEFENDERS_IN_BOX, NUMBER_OF_PASS_RUSHERS),
+    COALESCE(TRY_CAST(p.DEFENDERS_IN_BOX AS FLOAT),
+             TRY_CAST(f.N_DEFENSE_BOX AS FLOAT))    AS DEFENDERS_IN_BOX,
+    COALESCE(TRY_CAST(p.NUMBER_OF_PASS_RUSHERS AS FLOAT),
+             TRY_CAST(f.N_PASS_RUSHERS AS FLOAT))   AS NUMBER_OF_PASS_RUSHERS
+FROM RAW_PBP p
+LEFT JOIN RAW_FTN_CHARTING f
+    ON p.GAME_ID = f.NFLVERSE_GAME_ID
+   AND TRY_CAST(p.PLAY_ID AS FLOAT) = TRY_CAST(f.NFLVERSE_PLAY_ID AS FLOAT);
+
+-- =============================================================================
 -- PRESSURE_RATE and AVG_TIME_TO_THROW are sourced from Pro Football Reference
 -- and Next Gen Stats respectively, NOT from play-by-play participation.
 --
@@ -32,7 +62,7 @@ WITH pass_plays AS (
         TRY_CAST(NUMBER_OF_PASS_RUSHERS AS FLOAT) AS NUM_PASS_RUSHERS,
         TRY_CAST(DEFENDERS_IN_BOX AS FLOAT) AS DEFENDERS_IN_BOX,
         QB_SCRAMBLE
-    FROM RAW_PBP
+    FROM PBP_CHARTED
     WHERE PLAY_TYPE = 'pass'
       AND POSTEAM IS NOT NULL
       AND POSTEAM != 'nan'
@@ -128,7 +158,7 @@ WITH run_plays AS (
         CASE WHEN YARDS_GAINED <= 0 THEN 1 ELSE 0 END AS STUFFED,
         CASE WHEN YARDS_GAINED >= 10 THEN 1 ELSE 0 END AS EXPLOSIVE_RUN,
         CASE WHEN YARDS_GAINED < 2 THEN 1 ELSE 0 END AS SHORT_GAIN
-    FROM RAW_PBP
+    FROM PBP_CHARTED
     WHERE PLAY_TYPE = 'run'
       AND POSTEAM IS NOT NULL
       AND POSTEAM != 'nan'
@@ -191,7 +221,14 @@ WITH plays AS (
         DOWN, YDSTOGO, YARDLINE_100,
         PLAY_TYPE, EPA, SUCCESS,
         SACK, QB_HIT, YARDS_GAINED,
-        CASE WHEN UPPER(COALESCE(CAST(WAS_PRESSURE AS VARCHAR), '')) = 'TRUE' THEN 1
+        -- NULL, not 0, when pressure is unknown. WAS_PRESSURE comes from
+        -- participation, which is absent for in-progress seasons and only ~39%
+        -- populated for 2018-2022. The previous ELSE 0 turned "unknown" into a
+        -- confident "no pressure", which both understated historical 3rd-and-long
+        -- pressure rates and would have reported a flat 0.0 for the live season.
+        CASE WHEN WAS_PRESSURE IS NULL
+                  OR UPPER(CAST(WAS_PRESSURE AS VARCHAR)) IN ('NAN', 'NONE', '') THEN NULL
+             WHEN UPPER(CAST(WAS_PRESSURE AS VARCHAR)) = 'TRUE' THEN 1
              WHEN TRY_CAST(WAS_PRESSURE AS FLOAT) = 1 THEN 1
              ELSE 0 END AS WAS_PRESSURE_FLAG,
         CASE WHEN YARDS_GAINED <= 0 THEN 1 ELSE 0 END AS STUFFED,
@@ -219,8 +256,11 @@ SELECT
     ROUND(AVG(CASE WHEN THIRD_DOWN_TYPE = '3RD_SHORT' THEN SUCCESS END), 4) AS THIRD_SHORT_SUCCESS,
     ROUND(SUM(CASE WHEN THIRD_DOWN_TYPE = '3RD_LONG' AND SACK = 1 THEN 1 ELSE 0 END)::FLOAT /
           NULLIF(SUM(CASE WHEN THIRD_DOWN_TYPE = '3RD_LONG' AND PLAY_TYPE = 'pass' THEN 1 ELSE 0 END), 0), 4) AS THIRD_LONG_SACK_RATE,
+    -- Denominator counts only 3rd-and-long passes whose pressure state is
+    -- known, so the result is NULL rather than 0 when nothing is charted.
     ROUND(SUM(CASE WHEN THIRD_DOWN_TYPE = '3RD_LONG' AND WAS_PRESSURE_FLAG = 1 THEN 1 ELSE 0 END)::FLOAT /
-          NULLIF(SUM(CASE WHEN THIRD_DOWN_TYPE = '3RD_LONG' AND PLAY_TYPE = 'pass' THEN 1 ELSE 0 END), 0), 4) AS THIRD_LONG_PRESSURE_RATE,
+          NULLIF(SUM(CASE WHEN THIRD_DOWN_TYPE = '3RD_LONG' AND PLAY_TYPE = 'pass'
+                           AND WAS_PRESSURE_FLAG IS NOT NULL THEN 1 ELSE 0 END), 0), 4) AS THIRD_LONG_PRESSURE_RATE,
     ROUND(AVG(CASE WHEN FIELD_ZONE = 'REDZONE' THEN EPA END), 4) AS REDZONE_EPA,
     ROUND(SUM(CASE WHEN FIELD_ZONE = 'REDZONE' AND STUFFED = 1 AND PLAY_TYPE = 'run' THEN 1 ELSE 0 END)::FLOAT /
           NULLIF(SUM(CASE WHEN FIELD_ZONE = 'REDZONE' AND PLAY_TYPE = 'run' THEN 1 ELSE 0 END), 0), 4) AS REDZONE_STUFF_RATE,

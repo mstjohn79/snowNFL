@@ -36,6 +36,10 @@ PBP_KEEP = [
     'yardline_100','shotgun','no_huddle','qb_scramble','run_location','run_gap',
     'passer_player_name','rusher_player_name','score_differential',
     'half_seconds_remaining','wp','home_team','away_team',
+    # qtr / game_half / game_seconds_remaining are needed to identify
+    # high-leverage situations in clutch_features.sql -- the previous keep list
+    # had no way to tell which half or quarter a play was in.
+    'qtr','game_half','game_seconds_remaining',
     'offense_formation','offense_personnel','defenders_in_box',
     'number_of_pass_rushers','time_to_throw','was_pressure',
 ]
@@ -242,6 +246,35 @@ def load_pfr(conn, stat_type, table_name, dry_run=False):
         safe_write(conn, to_pandas(df), table_name, dry_run=dry_run)
 
 
+def load_ftn_charting(conn, dry_run=False):
+    """FTN play-by-play charting -- the live feed behind pbp_participation.
+
+    participation is FTN data republished retroactively, so the fields overlap
+    almost exactly: on 2025 plays, n_defense_box matches participation's
+    defenders_in_box on 99.8% of plays (corr 0.9996) and n_pass_rushers matches
+    number_of_pass_rushers on 100%. Unlike participation, nflreadpy permits FTN
+    for the current season, so it restores DEFENDERS_IN_BOX and
+    NUMBER_OF_PASS_RUSHERS for live weeks.
+
+    FTN only goes back to 2022, so feature_engineering.sql COALESCEs
+    participation first and falls back to FTN. FTN carries no pressure field,
+    so WAS_PRESSURE has no live substitute at play level.
+    """
+    print("Loading FTN charting...")
+    keep = ["nflverse_game_id", "nflverse_play_id", "season", "week",
+            "n_defense_box", "n_pass_rushers", "n_blitzers",
+            "is_qb_out_of_pocket", "is_qb_fault_sack", "is_play_action",
+            "is_screen_pass", "is_no_huddle"]
+
+    def fetch(yr):
+        df = nr.load_ftn_charting(seasons=[yr])
+        return df.select([c for c in keep if c in df.columns])
+
+    df = _load_per_season("RAW_FTN_CHARTING", fetch)
+    if df is not None:
+        safe_write(conn, to_pandas(df), "RAW_FTN_CHARTING", dry_run=dry_run)
+
+
 def load_rosters(conn, dry_run=False):
     # The old code called nfl.import_rosters(), which does not exist in
     # nfl_data_py 0.3.3 -- the bare except swallowed the AttributeError, so
@@ -388,6 +421,7 @@ def main():
         load_ngs(conn, 'rushing', 'RAW_NGS_RUSHING', args.dry_run)
         load_pfr(conn, 'pass', 'RAW_PFR_PASS', args.dry_run)
         load_pfr(conn, 'rush', 'RAW_PFR_RUSH', args.dry_run)
+        load_ftn_charting(conn, args.dry_run)
         load_rosters(conn, args.dry_run)
         load_depth_charts(conn, args.dry_run)
         print("\nAll data loaded successfully!")

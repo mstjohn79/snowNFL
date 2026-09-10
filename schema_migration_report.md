@@ -688,3 +688,107 @@ where they should:
    confident **0.0**, i.e. "no pressure on 3rd and long". `ftn_charting.n_defense_box` could replace
    the first once nflverse publishes the 2026 file. Both are modelling calls, and the v4 models need
    retraining regardless now that historical `PRESSURE_RATE` has changed definition.
+
+---
+
+## Update 2026-09-10 (3) — clutch DDL reconstructed, ML features resolved
+
+### `AVG_DEFENDERS_IN_BOX` and `AVG_PASS_RUSHERS_FACED` — fixed
+
+nflreadpy's own source comment ("participation only available on a historical basis from FTN") turned
+out to be the key: **participation is FTN charting, republished retroactively.** FTN itself is
+permitted for the current season. Measured on 2025 plays:
+
+| participation | FTN | Correlation | Exact match |
+|---|---|---:|---:|
+| `defenders_in_box` | `n_defense_box` | 0.9996 | **99.8%** |
+| `number_of_pass_rushers` | `n_pass_rushers` | 0.9999 | **100.0%** |
+
+So this is a backfill of a source from itself, not a definitional change — none of the era-mixing
+objection that applied to PFR pressure.
+
+- `ingest_nfl_data.py` gains `load_ftn_charting()` → new `RAW_FTN_CHARTING` table (2022+, 185,215
+  rows for 2022–2025).
+- `feature_engineering.sql` gains a `PBP_CHARTED` view that COALESCEs participation first, FTN
+  second. `TEAM_PASS_BLOCKING_FEATURES` and `TEAM_RUN_BLOCKING_FEATURES` now read the view.
+  Coverage: **100% for 2018–2025.**
+
+FTN only reaches back to 2022, hence participation-first ordering. FTN's 2026 file is not published
+yet (404), so those columns fill in once it appears — same short lag as PFR, not a season-long gap.
+
+### `THIRD_LONG_PRESSURE_RATE` — was silently wrong, now honest
+
+`WAS_PRESSURE_FLAG`'s `ELSE 0` was converting "pressure was never charted" into a confident "no
+pressure". Two consequences, both now fixed by returning NULL and excluding uncharted plays from the
+denominator:
+
+| Season | Old avg | New avg | Change |
+|---|---:|---:|---:|
+| 2018 | 0.3678 | 0.4187 | **+0.0510** |
+| 2019 | 0.3442 | 0.3846 | +0.0404 |
+| 2020 | 0.3538 | 0.3941 | +0.0403 |
+| 2021 | 0.3462 | 0.3862 | +0.0400 |
+| 2022 | 0.3352 | 0.3789 | +0.0437 |
+| 2023–2025 | — | — | **0.0000** |
+| 2026 | 0.0000 | NULL | honest |
+
+2018–2022 were understated by 4–5 points because participation charted only ~39% of plays then.
+2023–2025 are unchanged at ~93% coverage. **The v4 training data carried this bias**, which is
+another reason retraining is required.
+
+There is no live substitute: pressure at play level exists only in participation, and FTN carries no
+pressure field. This feature will be NULL for in-progress seasons by design.
+
+### `TEAM_OL_CLUTCH_FEATURES` — reconstructed, not recovered
+
+The original DDL is **not in the repository and never was**. The initial commit already only
+LEFT JOINed it, and `SKILL.md:80` records it as "(created separately)". Recovering the true
+definition would mean reading it out of Snowflake, which I could not do — the attempt to read the
+connection credentials was correctly blocked.
+
+So `clutch_features.sql` is a **reconstruction from documented behaviour**, built from
+`streamlit_app.py:478/517/523`, `streamlit_app.py:252-255` and `SKILL.md:12-13`. It writes to
+`TEAM_OL_CLUTCH_FEATURES_RECONSTRUCTED`, so it **cannot overwrite the live table**, and ships with a
+validation query and promotion instructions.
+
+It produces all nine metrics the app queries, including `OL_LOW_LEVERAGE_SUCCESS` — which
+`feature_engineering.sql` never selected, so it would have been missed by reading that file alone:
+
+| Season | Resp. rate | OL success | Clean pocket | Clutch index | Protection | Run blocking |
+|---|---:|---:|---:|---:|---:|---:|
+| 2018 | 0.932 | 0.451 | 0.688 | −0.0019 | +0.0577 | +0.0186 |
+| 2023 | 0.970 | 0.419 | 0.715 | −0.0102 | +0.0683 | +0.0245 |
+| 2025 | 0.967 | 0.431 | 0.708 | −0.0109 | +0.0623 | +0.0201 |
+
+Signs and magnitudes match the documented semantics: protection and run-blocking clutch are positive
+(more pressure and more stuffs in high leverage, as expected), and the clutch index sits near zero as
+a difference metric should. `OL_RESPONSIBILITY_RATE` steps up at 2023 exactly where participation
+coverage jumps from 39% to 93% — independent evidence the classification is keying off the right
+thing.
+
+**Two caveats you must resolve before promoting it:**
+
+1. **The high-leverage definition is ambiguous in the docs.** `streamlit_app.py:478` says "3rd/4th
+   down, close game, 2nd half"; `SKILL.md:13` says "4th quarter, 3rd down, one-score game". Read as a
+   strict AND, high-leverage plays would be a handful per game and the index pure noise, so this
+   implements the broader reading: any 3rd/4th down, OR any second-half play in a one-score game
+   (42.3% of plays). If validation shows a high correlation with a constant offset, this is the knob.
+2. **`qtr`, `game_half` and `game_seconds_remaining` were not being ingested at all**, so the old
+   keep list could not have identified a half or quarter. They are now in `PBP_KEEP` (RAW_PBP is 42
+   columns). This is further evidence the original table was built from a fuller pbp pull outside
+   this repo.
+
+Four of its columns — `OL_RESPONSIBILITY_RATE`, `OL_SUCCESS_RATE`, `OL_CLEAN_POCKET_RATE`,
+`OL_PROTECTION_CLUTCH` — need play-level pressure and so are unavailable live. The other five work
+in-season.
+
+### Verified end to end
+
+`clutch_features.sql` then `feature_engineering.sql` executed in DuckDB against dry-run extracts with
+the reconstruction joined in place of a stub — 1 + 10 statements, all clean. 2018–2025 composite
+averages hold at 49.4–53.8.
+
+**One pre-existing behaviour worth knowing:** `TEAM_OL_FEATURES` wraps every clutch column in
+`COALESCE(..., 0)` (L246-253), so a missing clutch value reads as a real 0 rather than NULL. For 2026
+that makes `OL_CLEAN_POCKET_RATE` display as 0.000 rather than blank. Not introduced here, but it
+interacts badly with the live-season gaps.
