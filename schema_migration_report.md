@@ -1,6 +1,6 @@
 # nflreadpy Migration Assessment — `ingest_nfl_data.py`
 
-**Date:** 2026-09-08, updated 2026-09-10 · **Status: migration applied.** `feature_engineering.sql` needed no change (verified). Nothing has been written to Snowflake — run the ingest to rebuild the tables.
+**Date:** 2026-09-08, updated 2026-09-10 · **Status: migration applied, plus pressure re-sourced to PFR.** Nothing has been written to Snowflake — run the ingest to rebuild the tables.
 
 Tested with `nflreadpy` 0.1.5 / `polars` 1.44.1 against `nfl_data_py` 0.3.3 / `pandas` 2.2.3 in
 throwaway virtualenvs. All comparisons were done on local frames and CSVs.
@@ -607,3 +607,84 @@ Every loader uses `overwrite=True`, so the run recreates each table. Two things 
 - `RAW_ROSTERS` gets created for the first time, since the old call never worked.
 
 The `--dry-run` output in `./dryrun_out/` is a faithful preview of exactly what will be written.
+
+---
+
+## Update 2026-09-10 (2) — pressure re-sourced to PFR
+
+Implemented option 1: `PRESSURE_RATE` now comes from PFR for **all** seasons, and
+`AVG_TIME_TO_THROW` from NGS, so neither depends on retroactive participation data.
+
+### Changes to `feature_engineering.sql`
+
+`TEAM_PASS_BLOCKING_FEATURES` gains two CTEs and no longer reads `WAS_PRESSURE` or
+`TIME_TO_THROW` from `RAW_PBP`:
+
+- `pfr_pressure` — `SUM(TIMES_PRESSURED)` per team-game from `RAW_PFR_PASS`
+  (`= TIMES_HURRIED + TIMES_HIT + TIMES_SACKED`), divided by pbp `DROPBACKS`.
+- `ngs_time_to_throw` — attempts-weighted `AVG_TIME_TO_THROW` per team-week from
+  `RAW_NGS_PASSING`, excluding `WEEK = 0` season-aggregate rows.
+
+Output column names and order are unchanged, so `TEAM_OL_FEATURES` and everything below it needed no
+edit.
+
+### Two team-abbreviation traps, caught before they shipped
+
+Both would have produced silent NULLs, not errors:
+
+| Source | Uses | Play-by-play uses | Blast radius |
+|---|---|---|---|
+| `RAW_PFR_PASS` | `OAK` (2018–19) | `LV` for every season | Raiders pressure NULL for 2 seasons |
+| `RAW_NGS_PASSING` | `LAR` | `LA` | **Rams time-to-throw NULL in every season** |
+
+Both are remapped in the CTEs. Verified coverage after remapping:
+
+| Season | Team-games | `PRESSURE_RATE` | `AVG_TIME_TO_THROW` |
+|---|---:|---:|---:|
+| 2018–2025 | 4,454 | **100%** | 98–99% |
+| 2026 | 2 | 0% (PFR not yet published) | 100% |
+
+### Re-weight guard for the publication lag
+
+PFR trails play-by-play by a few days, so early each season `PRESSURE_RATE` is NULL. Because the
+percentile windows are **not** partitioned by season, a NULL lands near the bottom of the all-time
+distribution and costs the game its whole 25% pressure component. Measured on the live 2026 opener,
+`COMPOSITE_OL_SCORE` came out at **27.8** against a historical average near 50.
+
+The `scored` CTE now redistributes that weight across the four components that are present
+(`/ 0.75`). Validated by recomputing 2018–2025 both ways:
+
+| | Mean absolute error vs true score |
+|---|---:|
+| **Re-weighted** | **1.08 points** |
+| Naive NULL (previous behaviour) | 12.56 points |
+
+This is not a 2026 workaround — the lag recurs every opening week, so the guard is permanent.
+
+### Verified end to end
+
+The whole of `feature_engineering.sql` was executed against the dry-run CSVs in DuckDB, with
+`TEAM_OL_CLUTCH_FEATURES` stubbed. All 9 statements run, `ML_TRAINING_DATA` builds, and scores land
+where they should:
+
+| Season | Games | Avg composite | Min | Max |
+|---|---:|---:|---:|---:|
+| 2018–2025 | 4,454 | 49.4 – 53.8 | 5.8 | 96.9 |
+| 2026 | 2 | 33.8 | 29.0 | 38.6 |
+
+2026's two games sit inside the historical single-game range; two games is not a sample.
+
+### Two things I did not change, and why
+
+1. **`TEAM_OL_CLUTCH_FEATURES` has no DDL anywhere in the repo.** It is read by
+   `feature_engineering.sql:209` and four `streamlit_app.py` queries, but nothing creates it — it
+   exists only in Snowflake, from something outside version control. Running the pipeline against a
+   clean schema would fail. I did not invent a definition, because guessing would silently produce
+   wrong clutch features. **Worth recovering the real DDL and committing it.**
+2. **`AVG_DEFENDERS_IN_BOX` and `THIRD_LONG_PRESSURE_RATE` are still participation-derived**, so they
+   remain unavailable live. Neither feeds `COMPOSITE_OL_SCORE` — both are ML-only features — but both
+   are in `FEATURE_COLS`, so `train_models.py:52`'s `dropna` will still exclude 2026 from training.
+   `THIRD_LONG_PRESSURE_RATE` is worse than NULL: `WAS_PRESSURE_FLAG`'s `ELSE 0` renders it a
+   confident **0.0**, i.e. "no pressure on 3rd and long". `ftn_charting.n_defense_box` could replace
+   the first once nflverse publishes the 2026 file. Both are modelling calls, and the v4 models need
+   retraining regardless now that historical `PRESSURE_RATE` has changed definition.

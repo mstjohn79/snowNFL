@@ -2,6 +2,21 @@ USE DATABASE NFL_ANALYTICS;
 USE SCHEMA OL_SCORING;
 USE WAREHOUSE COMPUTE_WH;
 
+-- =============================================================================
+-- PRESSURE_RATE and AVG_TIME_TO_THROW are sourced from Pro Football Reference
+-- and Next Gen Stats respectively, NOT from play-by-play participation.
+--
+-- Why: nflverse publishes pbp_participation retroactively -- nflreadpy caps it
+-- at get_current_season(roster=True) - 1 -- so WAS_PRESSURE and TIME_TO_THROW
+-- are unavailable for the whole of an in-progress season and only backfill the
+-- following spring. PFR and NGS are both updated weekly in-season.
+--
+-- Both replacements cover 2018+, matching START_SEASON in ingest_nfl_data.py,
+-- so each metric is defined identically for every season in the table. Do not
+-- mix sources by era: PFR pressure runs about 0.065 lower than participation's
+-- (0.227 vs 0.292 mean rate) and correlates r=0.57 at team-game level, so a
+-- per-season source switch would put a definitional break mid-table.
+-- =============================================================================
 CREATE OR REPLACE TABLE TEAM_PASS_BLOCKING_FEATURES AS
 WITH pass_plays AS (
     SELECT
@@ -14,8 +29,6 @@ WITH pass_plays AS (
         SUCCESS,
         SACK,
         QB_HIT,
-        TRY_CAST(TIME_TO_THROW AS FLOAT) AS TIME_TO_THROW,
-        TRY_CAST(WAS_PRESSURE AS FLOAT) AS WAS_PRESSURE,
         TRY_CAST(NUMBER_OF_PASS_RUSHERS AS FLOAT) AS NUM_PASS_RUSHERS,
         TRY_CAST(DEFENDERS_IN_BOX AS FLOAT) AS DEFENDERS_IN_BOX,
         QB_SCRAMBLE
@@ -23,28 +36,80 @@ WITH pass_plays AS (
     WHERE PLAY_TYPE = 'pass'
       AND POSTEAM IS NOT NULL
       AND POSTEAM != 'nan'
+),
+-- Pressures allowed, summed over every QB a team used in the game.
+-- TIMES_PRESSURED = TIMES_HURRIED + TIMES_HIT + TIMES_SACKED.
+-- NOTE: PFR labels the 2018-2019 Raiders OAK, while play-by-play uses LV for every
+-- season. Without this remap the Raiders silently get NULL pressure for those
+-- two seasons. Verified 100% team-game coverage 2018-2025 with it in place.
+pfr_pressure AS (
+    SELECT
+        GAME_ID,
+        CASE WHEN TEAM = 'OAK' THEN 'LV' ELSE TEAM END AS TEAM,
+        SUM(TRY_CAST(TIMES_PRESSURED AS FLOAT)) AS PRESSURES_ALLOWED
+    FROM RAW_PFR_PASS
+    GROUP BY GAME_ID, CASE WHEN TEAM = 'OAK' THEN 'LV' ELSE TEAM END
+),
+-- Time to throw, attempts-weighted across the QBs a team used that week.
+-- WEEK = 0 rows are season aggregates, not games, so they are excluded.
+-- NOTE: NGS labels the Rams LAR, while play-by-play uses LA. Without this remap the
+-- Rams silently get NULL time-to-throw in every season.
+ngs_time_to_throw AS (
+    SELECT
+        SEASON,
+        WEEK,
+        CASE WHEN TEAM_ABBR = 'LAR' THEN 'LA' ELSE TEAM_ABBR END AS TEAM,
+        SUM(TRY_CAST(AVG_TIME_TO_THROW AS FLOAT) * TRY_CAST(ATTEMPTS AS FLOAT))
+            / NULLIF(SUM(TRY_CAST(ATTEMPTS AS FLOAT)), 0) AS AVG_TIME_TO_THROW
+    FROM RAW_NGS_PASSING
+    WHERE TRY_CAST(WEEK AS INT) > 0
+      AND TEAM_ABBR IS NOT NULL
+    GROUP BY SEASON, WEEK, CASE WHEN TEAM_ABBR = 'LAR' THEN 'LA' ELSE TEAM_ABBR END
+),
+pass_agg AS (
+    SELECT
+        GAME_ID,
+        SEASON,
+        WEEK,
+        TEAM,
+        OPPONENT,
+        COUNT(*) AS DROPBACKS,
+        SUM(SACK) AS SACKS_ALLOWED,
+        ROUND(SUM(SACK) / NULLIF(COUNT(*), 0), 4) AS SACK_RATE,
+        SUM(QB_HIT) AS QB_HITS_ALLOWED,
+        ROUND(SUM(QB_HIT) / NULLIF(COUNT(*), 0), 4) AS QB_HIT_RATE,
+        ROUND(AVG(EPA), 4) AS PASS_EPA_PER_PLAY,
+        ROUND(AVG(SUCCESS), 4) AS PASS_SUCCESS_RATE,
+        SUM(QB_SCRAMBLE) AS QB_SCRAMBLES,
+        ROUND(SUM(QB_SCRAMBLE) / NULLIF(COUNT(*), 0), 4) AS SCRAMBLE_RATE,
+        ROUND(AVG(NUM_PASS_RUSHERS), 2) AS AVG_PASS_RUSHERS_FACED
+    FROM pass_plays
+    GROUP BY GAME_ID, SEASON, WEEK, TEAM, OPPONENT
 )
 SELECT
-    GAME_ID,
-    SEASON,
-    WEEK,
-    TEAM,
-    OPPONENT,
-    COUNT(*) AS DROPBACKS,
-    SUM(SACK) AS SACKS_ALLOWED,
-    ROUND(SUM(SACK) / NULLIF(COUNT(*), 0), 4) AS SACK_RATE,
-    SUM(QB_HIT) AS QB_HITS_ALLOWED,
-    ROUND(SUM(QB_HIT) / NULLIF(COUNT(*), 0), 4) AS QB_HIT_RATE,
-    SUM(WAS_PRESSURE) AS PRESSURES_ALLOWED,
-    ROUND(SUM(WAS_PRESSURE) / NULLIF(COUNT(*), 0), 4) AS PRESSURE_RATE,
-    ROUND(AVG(TIME_TO_THROW), 3) AS AVG_TIME_TO_THROW,
-    ROUND(AVG(EPA), 4) AS PASS_EPA_PER_PLAY,
-    ROUND(AVG(SUCCESS), 4) AS PASS_SUCCESS_RATE,
-    SUM(QB_SCRAMBLE) AS QB_SCRAMBLES,
-    ROUND(SUM(QB_SCRAMBLE) / NULLIF(COUNT(*), 0), 4) AS SCRAMBLE_RATE,
-    ROUND(AVG(NUM_PASS_RUSHERS), 2) AS AVG_PASS_RUSHERS_FACED
-FROM pass_plays
-GROUP BY GAME_ID, SEASON, WEEK, TEAM, OPPONENT;
+    a.GAME_ID,
+    a.SEASON,
+    a.WEEK,
+    a.TEAM,
+    a.OPPONENT,
+    a.DROPBACKS,
+    a.SACKS_ALLOWED,
+    a.SACK_RATE,
+    a.QB_HITS_ALLOWED,
+    a.QB_HIT_RATE,
+    f.PRESSURES_ALLOWED,
+    ROUND(f.PRESSURES_ALLOWED / NULLIF(a.DROPBACKS, 0), 4) AS PRESSURE_RATE,
+    ROUND(n.AVG_TIME_TO_THROW, 3) AS AVG_TIME_TO_THROW,
+    a.PASS_EPA_PER_PLAY,
+    a.PASS_SUCCESS_RATE,
+    a.QB_SCRAMBLES,
+    a.SCRAMBLE_RATE,
+    a.AVG_PASS_RUSHERS_FACED
+FROM pass_agg a
+LEFT JOIN pfr_pressure f
+    ON a.GAME_ID = f.GAME_ID AND a.TEAM = f.TEAM
+LEFT JOIN ngs_time_to_throw n
+    ON a.SEASON = n.SEASON AND a.WEEK = n.WEEK AND a.TEAM = n.TEAM;
 
 CREATE OR REPLACE TABLE TEAM_RUN_BLOCKING_FEATURES AS
 WITH run_plays AS (
@@ -241,11 +306,27 @@ pctls AS (
 ),
 scored AS (
     SELECT *,
-        ROUND((SACK_RATE_PCTL * 0.30
-             + QB_HIT_PCTL * 0.20
-             + PRESSURE_PCTL * 0.25
-             + PASS_EPA_PCTL * 0.15
-             + PASS_SUCCESS_PCTL * 0.10) * 100, 1) AS PASS_BLOCK_SCORE,
+        -- PRESSURE_RATE is NULL whenever PFR has not yet published the week in
+        -- question. That happens every season in the opening weeks, because PFR
+        -- lags play-by-play by a few days. The percentile windows below are not
+        -- partitioned by season, so a NULL would land near the bottom of the
+        -- all-time distribution and silently cost the game its full 25% pressure
+        -- component -- dropping affected games to roughly half their true score.
+        -- Redistribute that weight across the four components that are present
+        -- instead (0.30 + 0.20 + 0.15 + 0.10 = 0.75, hence the / 0.75).
+        ROUND(
+          CASE WHEN PRESSURE_RATE IS NULL THEN
+                (SACK_RATE_PCTL * 0.30
+               + QB_HIT_PCTL * 0.20
+               + PASS_EPA_PCTL * 0.15
+               + PASS_SUCCESS_PCTL * 0.10) / 0.75
+               ELSE
+                (SACK_RATE_PCTL * 0.30
+               + QB_HIT_PCTL * 0.20
+               + PRESSURE_PCTL * 0.25
+               + PASS_EPA_PCTL * 0.15
+               + PASS_SUCCESS_PCTL * 0.10)
+          END * 100, 1) AS PASS_BLOCK_SCORE,
         ROUND((STUFF_RATE_PCTL * 0.25
              + RUSH_YARDS_PCTL * 0.15
              + RUSH_EPA_PCTL * 0.25
