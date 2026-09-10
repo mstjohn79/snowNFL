@@ -413,24 +413,73 @@ Ingestion is working against live 2026 data as of Sept 10. What remains is not a
   `AVG_DEFENDERS_IN_BOX` are null for 2026.
 - **~March 2027:** participation backfills and a re-run fills those columns retroactively.
 
+### Pressure data: what else exists
+
+Asked and measured. Full inventory of pressure-adjacent sources, and how each behaves in-season:
+
+| Source | Field | In-season? | Coverage |
+|---|---|---|---|
+| `pbp_participation` | `was_pressure` | 🔴 **Never** — capped at roster year − 1 | 2016–2025 |
+| **`pfr_advstats('pass')`** | **`times_pressured`**, `times_hurried`, `times_hit`, `times_sacked`, `times_blitzed` | ✅ **Yes** — bounded on `get_current_season()` | 2018+ |
+| `pfr_advstats('def')` | `def_pressures`, `def_times_hurried`, `def_times_hitqb` | ✅ Yes | 2018+ |
+| `nextgen_stats('passing')` | `avg_time_to_throw` | ✅ Yes — live for 2026 today | 2016+ |
+| `ftn_charting` | `n_pass_rushers`, `n_defense_box`, `is_qb_out_of_pocket` | ⏳ 2026 file 404s today | 2022+ |
+
+**`RAW_PFR_PASS` already contains this.** It is one of the four tables nothing currently reads, it
+covers 2018+ (exactly `START_SEASON`), and unlike participation nflreadpy permits it for the current
+season — the 2026 404 is just "not built yet", not "not allowed".
+
+`times_pressured` is exactly `times_hurried + times_hit + times_sacked` (verified identity).
+
+#### How well it substitutes
+
+Measured against participation's `was_pressure` for all of 2025, 570 team-games, 100% matched:
+
+| Grain | Source | Pearson | Spearman |
+|---|---|---:|---:|
+| **Team-game** | PFR `times_pressured` | **0.567** | **0.562** |
+| Team-game | PFR `def_pressures` | 0.574 | 0.562 |
+| Team-game | PFR `times_hurried + times_hit` | 0.396 | 0.367 |
+| **Team-season** | PFR `times_pressured` | **0.838** | **0.844** |
+| Team-season | PFR `def_pressures` | 0.840 | 0.810 |
+
+PFR also runs systematically lower: mean pressure rate 0.227 against participation's 0.292, mean
+absolute difference 0.090.
+
+**The honest read:** PFR pressure is a good *season-level* proxy and a weak *game-level* one — and
+`TEAM_OL_SCORES` is scored per `GAME_ID`. Top-10 worst-pressure-rate teams overlap 7 of 10 on the
+season. The defensive side offers no advantage and covers 3 fewer team-games.
+
+#### The ML path is also affected
+
+`train_models.py:26-38` and `run_inference.py:11-23` both list `PRESSURE_RATE`,
+`AVG_TIME_TO_THROW`, `AVG_DEFENDERS_IN_BOX`, `THIRD_LONG_PRESSURE_RATE` and
+`ROLLING_5_PRESSURE_RATE` in `FEATURE_COLS`. `train_models.py:52` then does
+`dropna(subset=FEATURE_COLS)`, so **every 2026 row would be dropped from training**, and inference
+would run on NaN-filled inputs. Whatever is chosen has to cover the ML path, not just the SQL.
+
 ### Open question — scoring with no pressure data
 
 `feature_engineering.sql` is untouched and still weights `PRESSURE_PCTL` at 25% of pass block, so
 **scoring 2026 today would rank every 2026 game at the bottom of the all-time table.** Three ways to
 handle it:
 
-1. **Re-weight when pressure is null** — redistribute the 0.25 across `SACK_RATE`, `QB_HIT_RATE`,
-   `PASS_EPA` and `PASS_SUCCESS`, all of which are live. Keeps 2026 scores comparable to history and
-   is the statistically honest option. *Recommended.*
-2. **Partition the percentiles by season** — add `PARTITION BY SEASON` to the window functions. Stops
-   2026 being ranked against history, but does not fix the missing 25% within 2026, and it changes
-   the meaning of every historical score too.
-3. **Gate 2026 out of scoring** until the March 2027 backfill. Honest, but gives up the live-season
+1. **Re-source `PRESSURE_RATE` from PFR for *all* seasons (2018+).** One definition everywhere, live
+   every season, no nulls, no re-weighting, and the ML path keeps working untouched. Cost: historical
+   `PRESSURE_RATE` changes, so historical scores shift and the v4 models need retraining.
+   *Recommended* — it is the only option that leaves the pipeline with no missing-data special case.
+2. **Re-weight when pressure is null** — redistribute the 0.25 across `SACK_RATE`, `QB_HIT_RATE`,
+   `PASS_EPA` and `PASS_SUCCESS`. History untouched, but 2026 pass-block scores are built from four
+   components rather than five, and `FEATURE_COLS`/`dropna` still needs handling for the ML path.
+3. **Gate 2026 out of scoring** until the ~March 2027 backfill. Honest, but gives up the live-season
    goal.
 
-Option 1 plus sourcing `AVG_TIME_TO_THROW` from the already-ingested `RAW_NGS_PASSING` would get the
-live season scoring sensibly. That is a modelling change to `feature_engineering.sql`, so it is your
-call, not mine — say which and I will implement it.
+Do **not** use PFR only for 2026 and participation for history — that puts a definitional break
+exactly at the boundary you most want to compare across, with a 0.065 level shift in the metric.
+
+Either option 1 or 2 should also source `AVG_TIME_TO_THROW` from the already-ingested
+`RAW_NGS_PASSING`, which carries it live. These are modelling changes to `feature_engineering.sql`
+and the model feature set, so they are your call — say which and I will implement it.
 
 ---
 
