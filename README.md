@@ -13,7 +13,7 @@ An AI-powered analytics platform that scores, predicts, and analyzes NFL offensi
 ## Architecture
 
 ```
-nfl_data_py / Next Gen Stats / Pro Football Reference
+nflreadpy (nflverse) / Next Gen Stats / Pro Football Reference
         |
         v
   [ingest_nfl_data.py]
@@ -54,7 +54,8 @@ nfl_data_py / Next Gen Stats / Pro Football Reference
 
 | Source | Records | What It Provides |
 |--------|---------|-----------------|
-| nfl_data_py play-by-play | 389,358 plays | Every play from 2018-2025: sacks, pressures, EPA, yards, down/distance, win probability |
+| nflverse play-by-play | 389,358 plays | Every play from 2018-2025: sacks, EPA, yards, down/distance, win probability |
+| nflverse pbp participation | joined onto pbp | Pressures, time to throw, defenders in box, pass rushers faced |
 | Next Gen Stats (passing) | 4,785 rows | Time to throw, pass rushers faced |
 | Next Gen Stats (rushing) | 4,885 rows | Defenders in box, rush metrics |
 | Pro Football Reference | 23,885 rows | Advanced pass/rush efficiency metrics |
@@ -197,7 +198,7 @@ v4 uses the same 49 features as v3 but fixes a critical bug in the percentile sc
 
 | File | Purpose |
 |------|---------|
-| `ingest_nfl_data.py` | Downloads NFL data via nfl_data_py and loads into Snowflake raw tables |
+| `ingest_nfl_data.py` | Downloads NFL data via nflreadpy and loads into Snowflake raw tables (`--dry-run` writes CSVs instead) |
 | `feature_engineering.sql` | SQL to create all feature tables from raw play-by-play data |
 | `train_models.py` | Trains 3 XGBoost models (composite, pass, run) and registers in Snowflake Model Registry |
 | `run_inference.py` | Loads v4 models from registry and generates next-game predictions |
@@ -209,7 +210,8 @@ v4 uses the same 49 features as v3 but fixes a critical bug in the percentile sc
 
 ### Prerequisites
 - Snowflake account with Cortex AI enabled
-- Python 3.11+ with `nfl_data_py`, `snowflake-connector-python`, `snowflake-ml-python`, `xgboost`, `scikit-learn`
+- Python 3.11+ with `nflreadpy`, `polars`, `snowflake-connector-python`, `snowflake-ml-python`, `xgboost`, `scikit-learn`
+  (ingestion deps: `pip install -e '.[ingest]'`)
 - A named Snowflake connection (default: `martydemo`)
 
 ### 1. Ingest Data

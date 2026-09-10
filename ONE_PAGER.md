@@ -54,11 +54,11 @@ Our XGBoost models (v4, 49 features, R2=0.98) confirm the framework captures rea
 
 ## Technical Stack
 
-- **Data:** 389K plays from nfl_data_py (2018-2025), Next Gen Stats, Pro Football Reference
+- **Data:** 389K plays from nflverse via nflreadpy (2018-2025), Next Gen Stats, Pro Football Reference
 - **Compute:** Snowflake (feature engineering, model registry, Cortex AI for natural language Q&A)
 - **ML:** XGBoost regression, 49 features, 4 model generations
 - **App:** 9-page Streamlit dashboard with rankings, deep dives, clutch analysis, matchup predictor, and AI analyst
 
 ---
 
-*Built by Marty St. John | Data from nfl_data_py | Powered by Snowfl
+*Built by Marty St. John | Data from nflverse via nflreadpy | Powered by Snowfl

@@ -6,3 +6,16 @@ dependencies = [
     "snowflake-connector-python>=3.3.0",
     "streamlit[snowflake]>=1.35.0",
 ]
+
+# Ingestion-only deps. Kept out of [project.dependencies] on purpose:
+# snowflake.yml ships this file as a Streamlit-in-Snowflake artifact, so
+# anything listed there has to resolve in Snowflake's package channel.
+# ingest_nfl_data.py runs locally. Install with: pip install -e '.[ingest]'
+# On Apple Silicon under Rosetta, use polars[rtcompat] instead of polars.
+[project.optional-dependencies]
+ingest = [
+    "nflreadpy>=0.1.5",
+    "polars>=1.0",
+    "pandas>=2.0",
+    "pyarrow",
+]

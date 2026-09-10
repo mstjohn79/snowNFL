@@ -876,7 +876,7 @@ all 32 NFL teams from 2018-2025.
 
 | Source | What It Provides |
 |--------|-----------------|
-| **nfl_data_py (play-by-play)** | Every play from every game: sacks, pressures, EPA, yards, down/distance, win probability, score differential |
+| **nflverse play-by-play** (via nflreadpy) | Every play from every game: sacks, pressures, EPA, yards, down/distance, win probability, score differential |
 | **Next Gen Stats** | Time to throw, pass rushers faced, defenders in box |
 | **Pro Football Reference** | Advanced pass/rush metrics |
 | **Depth Charts** | Player-level OL starters by week |
@@ -1012,7 +1012,7 @@ feature** (0.294 importance), proving the framework captures real signal. Pass b
 ## Architecture
 
 ```
-nfl_data_py / NGS / PFR
+nflreadpy: pbp + participation / NGS / PFR
         |
         v
   [ingest_nfl_data.py]
@@ -1055,7 +1055,7 @@ nfl_data_py / NGS / PFR
 
 | File | Purpose |
 |------|---------|
-| `ingest_nfl_data.py` | Downloads NFL data via nfl_data_py and loads into Snowflake |
+| `ingest_nfl_data.py` | Downloads NFL data via nflreadpy and loads into Snowflake |
 | `feature_engineering.sql` | Creates all feature tables from raw play-by-play data |
 | `train_models.py` | Trains XGBoost models and registers them in Snowflake Model Registry |
 | `run_inference.py` | Runs inference on latest features to generate next-game predictions |
